@@ -6,20 +6,20 @@ import plotly.graph_objects as go
 
 # --- PAGE CONFIG ---
 st.set_page_config(
-    page_title="TDH Funnel & UTM Attribution Dashboard",
-    page_icon="🎯",
+    page_title="Tagmango & L1 Ad Performance Analyzer",
+    page_icon="🚀",
     layout="wide"
 )
 
-st.title("🎯 The Divine Hour: Ad Attribution & Funnel Analytics")
+st.title("🚀 Campaign, Ad Set & Ad Performance Analyzer (Tagmango ➔ L1)")
 st.markdown(
-    "Analyze Front-End Workshop Leads (`₹199`) and automatically attribute High-Ticket Back-End Sales (`₹7,999`) "
-    "back to their exact **UTM Source, Campaign, Ad Set (`utm_medium`), and Ad Creative (`utm_content`)**."
+    "Upload your **Tagmango Front-End Leads (with UTMs)** and **L1 Conversion File (Name, Email, Mobile)** "
+    "to analyze which **Campaign, Ad Set, and Ad** is driving leads, L1 conversions, and revenue."
 )
 
 # --- HELPER FUNCTIONS ---
 def clean_phone(series):
-    """Normalizes phone numbers to the last 10 digits for reliable cross-file matching."""
+    """Normalizes phone numbers to last 10 digits, removing .0, spaces, and +91."""
     return (
         series.astype(str)
         .str.replace(r"\.0$", "", regex=True)
@@ -31,333 +31,399 @@ def clean_email(series):
     """Normalizes email addresses to lowercase trimmed strings."""
     return series.astype(str).str.strip().str.lower()
 
+def find_col(columns, candidates, default_idx=0):
+    """Finds the best matching column index from a list of candidate names."""
+    cols_lower = [c.lower().strip() for c in columns]
+    for cand in candidates:
+        if cand.lower() in cols_lower:
+            return cols_lower.index(cand.lower())
+    for cand in candidates:
+        for i, c in enumerate(cols_lower):
+            if cand.lower() in c:
+                return i
+    return default_idx
+
 @st.cache_data
-def load_file(uploaded_file):
+def load_dataset(uploaded_file):
     if uploaded_file.name.endswith((".xlsx", ".xls")):
-        return pd.read_excel(uploaded_file)
+        xls = pd.ExcelFile(uploaded_file)
+        sheet = "Report" if "Report" in xls.sheet_names else xls.sheet_names[0]
+        return pd.read_excel(uploaded_file, sheet_name=sheet)
     return pd.read_csv(uploaded_file)
 
 # --- SIDEBAR: FILE UPLOADERS ---
-st.sidebar.header("📁 1. Upload Funnel Files")
-leads_file = st.sidebar.file_uploader(
-    "Upload Front-End Leads (Tagmango XLSX/CSV)",
+st.sidebar.header("📁 1. Upload Data Files")
+tagmango_file = st.sidebar.file_uploader(
+    "Upload Tagmango Leads File (XLSX/CSV)",
     type=["xlsx", "xls", "csv"],
-    key="leads"
+    key="tm_file"
 )
-sales_file = st.sidebar.file_uploader(
-    "Upload Back-End High-Ticket Sales (CSV/XLSX)",
+l1_file = st.sidebar.file_uploader(
+    "Upload L1 Conversions File (CSV/XLSX)",
     type=["csv", "xlsx", "xls"],
-    key="sales"
+    key="l1_file"
 )
 
-st.sidebar.divider()
-st.sidebar.header("💰 2. Optional Ad Spend (ROAS)")
-total_ad_spend = st.sidebar.number_input(
-    "Enter Total Ad Spend (₹) for ROAS/CPL:",
-    min_value=0.0,
-    value=0.0,
-    step=5000.0
-)
+if tagmango_file is not None:
+    df_tm = load_dataset(tagmango_file)
+    tm_cols = df_tm.columns.tolist()
 
-if leads_file is not None:
-    df_leads = load_file(leads_file)
+    # --- SIDEBAR: COLUMN MAPPING ---
+    with st.sidebar.expander("⚙️ 2. Column & UTM Mapping", expanded=False):
+        st.caption("**Tagmango File Columns**")
+        tm_email_col = st.selectbox("Lead Email", tm_cols, index=find_col(tm_cols, ["email"]))
+        tm_phone_col = st.selectbox("Lead Phone/Mobile", tm_cols, index=find_col(tm_cols, ["phone", "mobile", "contact"]))
+        tm_price_col = st.selectbox("Front-End Price", ["None"] + tm_cols, index=find_col(["None"] + tm_cols, ["mango price(sub)", "price", "amount"], 0))
+        tm_date_col = st.selectbox("Order Date", ["None"] + tm_cols, index=find_col(["None"] + tm_cols, ["order date", "date", "created"], 0))
+        tm_mango_col = st.selectbox("Workshop / Mango Name", ["None"] + tm_cols, index=find_col(["None"] + tm_cols, ["mango name", "workshop", "product"], 0))
 
-    # Standardize Lead Columns
-    df_leads["clean_email"] = clean_email(df_leads["email"])
-    df_leads["clean_phone"] = clean_phone(df_leads["phone"])
-    df_leads["Order_DT"] = pd.to_datetime(df_leads["Order Date"], format="%d/%m/%Y %I:%M %p", errors="coerce")
-    if df_leads["Order_DT"].isna().all():
-        df_leads["Order_DT"] = pd.to_datetime(df_leads["Order Date"], dayfirst=True, errors="coerce")
+        st.caption("**Ad Hierarchy (UTM) Columns**")
+        utm_camp_col = st.selectbox("Campaign Column", tm_cols, index=find_col(tm_cols, ["utm_campaign", "campaign"]))
+        utm_adset_col = st.selectbox("Ad Set Column", tm_cols, index=find_col(tm_cols, ["utm_medium", "utm_term", "adset", "ad_set"]))
+        utm_ad_col = st.selectbox("Ad / Creative Column", tm_cols, index=find_col(tm_cols, ["utm_content", "utm_term", "ad"]))
+        utm_source_col = st.selectbox("Source / Placement Column", tm_cols, index=find_col(tm_cols, ["utm_source", "source"]))
 
-    df_leads["Mango Price(Sub)"] = pd.to_numeric(df_leads["Mango Price(Sub)"], errors="coerce").fillna(0)
+    # Standardize Tagmango DataFrame
+    df_tm["clean_email"] = clean_email(df_tm[tm_email_col])
+    df_tm["clean_phone"] = clean_phone(df_tm[tm_phone_col])
+    df_tm["FE_Price"] = pd.to_numeric(df_tm[tm_price_col], errors="coerce").fillna(0) if tm_price_col != "None" else 0.0
 
-    utm_cols = ["utm_source", "utm_campaign", "utm_medium", "utm_content", "utm_term", "Mango Name", "device_type", "initiated_platform"]
-    for col in utm_cols:
-        if col in df_leads.columns:
-            df_leads[col] = df_leads[col].fillna("Unattributed / Direct").astype(str)
-        else:
-            df_leads[col] = "Unattributed / Direct"
+    if tm_date_col != "None":
+        df_tm["Order_DT"] = pd.to_datetime(df_tm[tm_date_col], format="%d/%m/%Y %I:%M %p", errors="coerce")
+        if df_tm["Order_DT"].isna().all():
+            df_tm["Order_DT"] = pd.to_datetime(df_tm[tm_date_col], dayfirst=True, errors="coerce")
+    else:
+        df_tm["Order_DT"] = pd.NaT
+
+    df_tm["Campaign"] = df_tm[utm_camp_col].fillna("Unattributed / Direct").astype(str).str.strip()
+    df_tm["Ad_Set"] = df_tm[utm_adset_col].fillna("Unattributed / Direct").astype(str).str.strip()
+    df_tm["Ad"] = df_tm[utm_ad_col].fillna("Unattributed / Direct").astype(str).str.strip()
+    df_tm["Source"] = df_tm[utm_source_col].fillna("Unattributed / Direct").astype(str).str.strip()
+    df_tm["Mango_Name"] = df_tm[tm_mango_col].fillna("Default").astype(str) if tm_mango_col != "None" else "All Workshops"
+
+    # Replace empty strings with Unattributed / Direct
+    for c in ["Campaign", "Ad_Set", "Ad", "Source"]:
+        df_tm[c] = df_tm[c].replace({"": "Unattributed / Direct", "nan": "Unattributed / Direct", "None": "Unattributed / Direct"})
 
     # --- SIDEBAR FILTERS ---
-    st.sidebar.divider()
-    st.sidebar.header("🔍 3. Funnel Filters")
-
-    if df_leads["Order_DT"].notna().any():
-        min_d = df_leads["Order_DT"].min().date()
-        max_d = df_leads["Order_DT"].max().date()
-        date_range = st.sidebar.date_input("Lead Order Date Range", value=(min_d, max_d), min_value=min_d, max_value=max_d)
+    st.sidebar.header("🔍 3. Filters")
+    if df_tm["Order_DT"].notna().any():
+        min_d = df_tm["Order_DT"].min().date()
+        max_d = df_tm["Order_DT"].max().date()
+        date_range = st.sidebar.date_input("Tagmango Lead Date Range", value=(min_d, max_d), min_value=min_d, max_value=max_d)
         if len(date_range) == 2:
-            df_leads = df_leads[(df_leads["Order_DT"].dt.date >= date_range[0]) & (df_leads["Order_DT"].dt.date <= date_range[1])]
+            df_tm = df_tm[(df_tm["Order_DT"].dt.date >= date_range[0]) & (df_tm["Order_DT"].dt.date <= date_range[1])]
 
-    mango_options = sorted(df_leads["Mango Name"].unique().tolist())
-    selected_mangos = st.sidebar.multiselect("Filter Workshop (Mango Name)", mango_options, default=mango_options)
-    if selected_mangos:
-        df_leads = df_leads[df_leads["Mango Name"].isin(selected_mangos)]
+    sources_list = sorted(df_tm["Source"].unique().tolist())
+    sel_sources = st.sidebar.multiselect("Filter UTM Source", sources_list, default=sources_list)
+    if sel_sources:
+        df_tm = df_tm[df_tm["Source"].isin(sel_sources)]
 
-    source_options = sorted(df_leads["utm_source"].unique().tolist())
-    selected_sources = st.sidebar.multiselect("Filter UTM Source", source_options, default=source_options)
-    if selected_sources:
-        df_leads = df_leads[df_leads["utm_source"].isin(selected_sources)]
+    mango_list = sorted(df_tm["Mango_Name"].unique().tolist())
+    if len(mango_list) > 1:
+        sel_mangos = st.sidebar.multiselect("Filter Mango Name", mango_list, default=mango_list)
+        if sel_mangos:
+            df_tm = df_tm[df_tm["Mango_Name"].isin(sel_mangos)]
 
-    # --- CROSS-MATCHING BACK-END SALES TO FRONT-END LEADS ---
-    has_sales = sales_file is not None
-    if has_sales:
-        df_sales = load_file(sales_file)
-        df_sales["clean_email"] = clean_email(df_sales["Email"])
-        df_sales["clean_phone"] = clean_phone(df_sales["Mobile"])
-        df_sales["Amount"] = pd.to_numeric(df_sales["Amount"], errors="coerce").fillna(0)
-        df_sales["Sale_DT"] = pd.to_datetime(df_sales["Date"], format="%d/%m/%Y %I:%M:%S %p", errors="coerce")
-        if df_sales["Sale_DT"].isna().all():
-            df_sales["Sale_DT"] = pd.to_datetime(df_sales["Date"], dayfirst=True, errors="coerce")
+    exclude_unattributed = st.sidebar.checkbox("Hide 'Unattributed / Direct' in Charts", value=False)
+    default_l1_price = st.sidebar.number_input("Default L1 Ticket Price (₹) (if no Amount column)", value=7999.0, step=500.0)
 
-        # Deduplicate leads (earliest registration wins for first-touch attribution)
-        leads_email_map = df_leads.sort_values("Order_DT").drop_duplicates("clean_email", keep="first")
-        leads_phone_map = df_leads.sort_values("Order_DT").drop_duplicates("clean_phone", keep="first")
+    # --- L1 CONVERSION FILE PROCESSING & MATCHING ---
+    has_l1 = l1_file is not None
+    if has_l1:
+        df_l1 = load_dataset(l1_file)
+        l1_cols = df_l1.columns.tolist()
 
-        merge_Select = ["Mango Name", "Mango Price(Sub)", "utm_source", "utm_campaign", "utm_medium", "utm_content", "utm_term", "device_type", "Order_DT"]
+        with st.sidebar.expander("⚙️ L1 File Column Mapping", expanded=False):
+            l1_name_col = st.selectbox("L1 Buyer Name", l1_cols, index=find_col(l1_cols, ["name", "buyer", "customer"]))
+            l1_email_col = st.selectbox("L1 Buyer Email", l1_cols, index=find_col(l1_cols, ["email", "mail"]))
+            l1_phone_col = st.selectbox("L1 Buyer Mobile", l1_cols, index=find_col(l1_cols, ["mobile", "phone", "contact", "whatsapp"]))
+            l1_amt_col = st.selectbox("L1 Amount Paid (Optional)", ["None"] + l1_cols, index=find_col(["None"] + l1_cols, ["amount", "price", "value", "paid"], 0))
+            l1_date_col = st.selectbox("L1 Conversion Date (Optional)", ["None"] + l1_cols, index=find_col(["None"] + l1_cols, ["date", "time", "created"], 0))
 
-        # Step 1: Match by Email
-        sales_attributed = df_sales.merge(
-            leads_email_map[["clean_email"] + merge_Select],
-            on="clean_email",
-            how="left"
-        )
+        df_l1["Buyer_Name"] = df_l1[l1_name_col].astype(str)
+        df_l1["clean_email"] = clean_email(df_l1[l1_email_col])
+        df_l1["clean_phone"] = clean_phone(df_l1[l1_phone_col])
+        if l1_amt_col != "None":
+            df_l1["L1_Amount"] = pd.to_numeric(df_l1[l1_amt_col].astype(str).str.replace(r"[₹$,\s]", "", regex=True), errors="coerce").fillna(default_l1_price)
+        else:
+            df_l1["L1_Amount"] = default_l1_price
 
-        # Step 2: Fallback Match by 10-Digit Phone Number
-        unmatched_mask = sales_attributed["Order_DT"].isna()
-        if unmatched_mask.any():
-            phone_matched = df_sales[unmatched_mask].merge(
-                leads_phone_map[["clean_phone"] + merge_Select],
+        if l1_date_col != "None":
+            df_l1["L1_DT"] = pd.to_datetime(df_l1[l1_date_col], format="%d/%m/%Y %I:%M:%S %p", errors="coerce")
+            if df_l1["L1_DT"].isna().all():
+                df_l1["L1_DT"] = pd.to_datetime(df_l1[l1_date_col], dayfirst=True, errors="coerce")
+        else:
+            df_l1["L1_DT"] = pd.NaT
+
+        # Deduplicate Tagmango leads for first-touch attribution
+        tm_sorted = df_tm.sort_values("Order_DT") if df_tm["Order_DT"].notna().any() else df_tm
+        tm_email_map = tm_sorted[tm_sorted["clean_email"] != ""].drop_duplicates("clean_email", keep="first")
+        tm_phone_map = tm_sorted[tm_sorted["clean_phone"] != ""].drop_duplicates("clean_phone", keep="first")
+
+        attr_cols = ["Campaign", "Ad_Set", "Ad", "Source", "Mango_Name", "FE_Price", "Order_DT"]
+
+        # 1. Match by Email
+        l1_matched = df_l1.merge(tm_email_map[["clean_email"] + attr_cols], on="clean_email", how="left")
+        l1_matched["Match_Method"] = np.where(l1_matched["Campaign"].notna(), "Email Match", "Unmatched")
+
+        # 2. Fallback Match by 10-digit Mobile
+        unmatched_idx = l1_matched["Campaign"].isna()
+        if unmatched_idx.any():
+            phone_lookup = df_l1.loc[unmatched_idx].merge(
+                tm_phone_map[["clean_phone"] + attr_cols],
                 on="clean_phone",
                 how="left"
             )
-            for col in merge_Select:
-                sales_attributed.loc[unmatched_mask, col] = phone_matched[col].values
+            for col in attr_cols:
+                l1_matched.loc[unmatched_idx, col] = phone_lookup[col].values
+            l1_matched.loc[unmatched_idx & l1_matched["Campaign"].notna(), "Match_Method"] = "Mobile Match"
 
-        sales_attributed["Matched_Status"] = np.where(sales_attributed["Order_DT"].notna(), "Matched to Lead", "Unmatched (Not in Filtered Leads)")
-        sales_attributed["Days_to_Convert"] = (sales_attributed["Sale_DT"] - sales_attributed["Order_DT"]).dt.total_seconds() / 86400.0
-
-        for col in ["utm_source", "utm_campaign", "utm_medium", "utm_content", "utm_term", "Mango Name"]:
-            sales_attributed[col] = sales_attributed[col].fillna("Unmatched Buyer")
+        l1_matched["Days_to_Convert"] = (l1_matched["L1_DT"] - l1_matched["Order_DT"]).dt.total_seconds() / 86400.0
+        l1_valid = l1_matched[l1_matched["Match_Method"] != "Unmatched"].copy()
     else:
-        sales_attributed = pd.DataFrame()
+        df_l1 = pd.DataFrame()
+        l1_matched = pd.DataFrame()
+        l1_valid = pd.DataFrame()
 
-    # --- EXECUTIVE SUMMARY KPIs ---
-    total_leads = len(df_leads)
-    fe_revenue = df_leads["Mango Price(Sub)"].sum()
+    # --- TOP KPI SUMMARY ---
+    total_leads = len(df_tm)
+    fe_rev = df_tm["FE_Price"].sum()
+    total_l1_buyers = len(df_l1) if has_l1 else 0
+    matched_l1_buyers = len(l1_valid) if has_l1 else 0
+    l1_rev = df_l1["L1_Amount"].sum() if has_l1 else 0.0
+    matched_l1_rev = l1_valid["L1_Amount"].sum() if has_l1 else 0.0
+    l1_cvr = (matched_l1_buyers / total_leads * 100) if total_leads > 0 else 0.0
+    total_rev = fe_rev + l1_rev
 
-    if has_sales:
-        matched_sales_df = sales_attributed[sales_attributed["Matched_Status"] == "Matched to Lead"]
-        total_be_sales = len(sales_attributed)
-        matched_be_sales = len(matched_sales_df)
-        be_revenue = sales_attributed["Amount"].sum()
-        matched_be_revenue = matched_sales_df["Amount"].sum()
-        conv_rate = (matched_be_sales / total_leads * 100) if total_leads > 0 else 0.0
-        avg_days = matched_sales_df["Days_to_Convert"].mean()
-    else:
-        total_be_sales = matched_be_sales = 0
-        be_revenue = matched_be_revenue = conv_rate = avg_days = 0.0
-
-    combined_revenue = fe_revenue + be_revenue
-
-    st.subheader("📊 Executive Funnel Summary")
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Front-End Leads (₹199)", f"{total_leads:,}", f"Rev: ₹{fe_revenue:,.0f}")
-    k2.metric("High-Ticket Sales (₹7,999)", f"{total_be_sales:,}", f"Matched: {matched_be_sales} ({ (matched_be_sales/total_be_sales*100) if total_be_sales else 0:.1f}%)")
-    k3.metric("Back-End Revenue", f"₹{be_revenue:,.0f}", f"Matched Rev: ₹{matched_be_revenue:,.0f}")
-    k4.metric("Total Funnel Revenue", f"₹{combined_revenue:,.0f}", f"Lead-to-Sale CVR: {conv_rate:.2f}%")
-
-    if total_ad_spend > 0:
-        s1, s2, s3, s4 = st.columns(4)
-        cpl = total_ad_spend / total_leads if total_leads > 0 else 0
-        fe_roas = fe_revenue / total_ad_spend
-        be_cpa = total_ad_spend / total_be_sales if total_be_sales > 0 else 0
-        total_roas = combined_revenue / total_ad_spend
-        s1.metric("Cost Per Lead (CPL)", f"₹{cpl:,.2f}")
-        s2.metric("Front-End ROAS (Self-Liquidating)", f"{fe_roas:.2f}x")
-        s3.metric("Cost Per High-Ticket Sale (CPA)", f"₹{be_cpa:,.2f}")
-        s4.metric("Combined Funnel ROAS", f"{total_roas:.2f}x", delta=f"Net: ₹{combined_revenue - total_ad_spend:,.0f}")
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Tagmango Leads (L0)", f"{total_leads:,}", f"FE Rev: ₹{fe_rev:,.0f}")
+    k2.metric("Total L1 Conversions", f"{total_l1_buyers:,}", f"Matched: {matched_l1_buyers} ({(matched_l1_buyers/total_l1_buyers*100) if total_l1_buyers else 0:.1f}%)")
+    k3.metric("Lead ➔ L1 Conv. Rate", f"{l1_cvr:.2f}%", f"{matched_l1_buyers} of {total_leads:,} leads")
+    k4.metric("L1 Back-End Revenue", f"₹{l1_rev:,.0f}", f"Attributed: ₹{matched_l1_rev:,.0f}")
+    k5.metric("Total Funnel Revenue", f"₹{total_rev:,.0f}", f"EPL: ₹{(total_rev/total_leads) if total_leads else 0:,.1f}/lead")
 
     st.divider()
 
-    # --- AGGREGATION BUILDER ---
-    def build_attribution_table(dimension):
-        lead_grp = df_leads.groupby(dimension, as_index=False).agg(
-            Front_End_Leads=("clean_email", "count"),
-            Front_End_Revenue=("Mango Price(Sub)", "sum")
+    # --- CORE AGGREGATION ENGINE ---
+    def get_performance_table(group_cols):
+        if isinstance(group_cols, str):
+            group_cols = [group_cols]
+
+        leads_grp = df_tm.groupby(group_cols, as_index=False).agg(
+            Leads=("clean_email", "count"),
+            FE_Revenue=("FE_Price", "sum")
         )
-        if has_sales:
-            sale_grp = sales_attributed[sales_attributed["Matched_Status"] == "Matched to Lead"].groupby(dimension, as_index=False).agg(
-                High_Ticket_Sales=("clean_email", "count"),
-                Back_End_Revenue=("Amount", "sum"),
-                Avg_Days_to_Convert=("Days_to_Convert", "mean")
+
+        if has_l1 and not l1_valid.empty:
+            l1_grp = l1_valid.groupby(group_cols, as_index=False).agg(
+                L1_Conversions=("clean_email", "count"),
+                L1_Revenue=("L1_Amount", "sum"),
+                Avg_Days_to_Close=("Days_to_Convert", "mean")
             )
-            merged = pd.merge(lead_grp, sale_grp, on=dimension, how="left").fillna({
-                "High_Ticket_Sales": 0,
-                "Back_End_Revenue": 0.0,
-                "Avg_Days_to_Convert": 0.0
+            perf = pd.merge(leads_grp, l1_grp, on=group_cols, how="left").fillna({
+                "L1_Conversions": 0,
+                "L1_Revenue": 0.0,
+                "Avg_Days_to_Close": 0.0
             })
         else:
-            merged = lead_grp.copy()
-            merged["High_Ticket_Sales"] = 0
-            merged["Back_End_Revenue"] = 0.0
-            merged["Avg_Days_to_Convert"] = 0.0
+            perf = leads_grp.copy()
+            perf["L1_Conversions"] = 0
+            perf["L1_Revenue"] = 0.0
+            perf["Avg_Days_to_Close"] = 0.0
 
-        merged["Total_Revenue"] = merged["Front_End_Revenue"] + merged["Back_End_Revenue"]
-        merged["Lead_to_Sale_CVR (%)"] = np.where(
-            merged["Front_End_Leads"] > 0,
-            (merged["High_Ticket_Sales"] / merged["Front_End_Leads"]) * 100,
-            0.0
-        )
-        merged["Revenue_Per_Lead (EPL)"] = np.where(
-            merged["Front_End_Leads"] > 0,
-            merged["Total_Revenue"] / merged["Front_End_Leads"],
-            0.0
-        )
-        return merged.sort_values(by=["Total_Revenue", "Front_End_Leads"], ascending=[False, False])
+        perf["L1_Conv_Rate (%)"] = np.where(perf["Leads"] > 0, (perf["L1_Conversions"] / perf["Leads"]) * 100, 0.0)
+        perf["Total_Revenue"] = perf["FE_Revenue"] + perf["L1_Revenue"]
+        perf["Revenue_Per_Lead"] = np.where(perf["Leads"] > 0, perf["Total_Revenue"] / perf["Leads"], 0.0)
 
-    # --- TABS ---
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "🎯 UTM Attribution & ROAS",
-        "🎨 Ad Creative (`utm_content`) Deep-Dive",
-        "⏱️ Conversion Velocity & Trends",
-        "📋 Matched Buyers Explorer"
+        return perf.sort_values(by=["L1_Conversions", "Leads"], ascending=[False, False])
+
+    def style_perf_table(df_in):
+        return df_in.style.format({
+            "Leads": "{:,.0f}",
+            "FE_Revenue": "₹{:,.0f}",
+            "L1_Conversions": "{:,.0f}",
+            "L1_Conv_Rate (%)": "{:.2f}%",
+            "L1_Revenue": "₹{:,.0f}",
+            "Total_Revenue": "₹{:,.0f}",
+            "Revenue_Per_Lead": "₹{:,.1f}",
+            "Avg_Days_to_Close": "{:.1f} d"
+        }).background_gradient(subset=["L1_Conversions", "Total_Revenue"], cmap="Greens")
+
+    # --- PERFORMANCE TABS ---
+    tab_camp, tab_adset, tab_ad, tab_hier, tab_buyers = st.tabs([
+        "📢 1. Campaign Performance",
+        "🗂️ 2. Ad Set Performance",
+        "🎨 3. Ad (Creative) Performance",
+        "🌳 4. Full Hierarchy (Campaign ➔ Ad Set ➔ Ad)",
+        "👥 5. Matched L1 Buyers & Unmatched List"
     ])
 
-    with tab1:
-        st.subheader("Full-Funnel Attribution Breakdown")
-        dim_map = {
-            "UTM Source (Platform / Placement)": "utm_source",
-            "UTM Campaign": "utm_campaign",
-            "UTM Medium (Ad Set / Audience)": "utm_medium",
-            "UTM Content (Ad Creative)": "utm_content",
-            "Workshop Funnel (Mango Name)": "Mango Name",
-            "Device & Platform": "initiated_platform"
-        }
-        selected_label = st.selectbox("Group Attribution By:", list(dim_map.keys()))
-        dim_col = dim_map[selected_label]
+    # --- TAB 1: CAMPAIGN PERFORMANCE ---
+    with tab_camp:
+        st.subheader("📢 Campaign Performance (`utm_campaign`)")
+        camp_df = get_performance_table("Campaign")
+        chart_camp = camp_df[camp_df["Campaign"] != "Unattributed / Direct"] if exclude_unattributed else camp_df
 
-        attr_df = build_attribution_table(dim_col)
-
-        col_c1, col_c2 = st.columns(2)
-        with col_c1:
-            fig_leads = px.bar(
-                attr_df.sort_values("Front_End_Leads", ascending=False).head(12),
-                x="Front_End_Leads", y=dim_col, orientation="h",
-                title=f"Top 12 {selected_label} by Front-End Leads",
-                text_auto=True, color="Front_End_Leads", color_continuous_scale="Blues"
+        c1, c2 = st.columns(2)
+        with c1:
+            fig_c_l1 = px.bar(
+                chart_camp.sort_values("L1_Conversions", ascending=False).head(15),
+                x="L1_Conversions", y="Campaign", orientation="h",
+                color="L1_Conv_Rate (%)", text_auto=True,
+                title="Top Campaigns by L1 Conversions (Colored by Conv. Rate %)",
+                color_continuous_scale="Viridis"
             )
-            fig_leads.update_layout(yaxis={"categoryorder": "total ascending"})
-            st.plotly_chart(fig_leads, use_container_width=True)
+            fig_c_l1.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(fig_c_l1, use_container_width=True)
 
-        with col_c2:
-            fig_rev = px.bar(
-                attr_df.sort_values("Total_Revenue", ascending=False).head(12),
-                x=["Front_End_Revenue", "Back_End_Revenue"], y=dim_col, orientation="h",
-                title=f"Top 12 {selected_label} by Total Funnel Revenue (FE + BE)",
+        with c2:
+            fig_c_leads = px.bar(
+                chart_camp.sort_values("Leads", ascending=False).head(15),
+                x="Leads", y="Campaign", orientation="h",
+                color="Total_Revenue", text_auto=True,
+                title="Top Campaigns by Tagmango Leads (Colored by Total Revenue)",
+                color_continuous_scale="Blues"
+            )
+            fig_c_leads.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(fig_c_leads, use_container_width=True)
+
+        st.dataframe(style_perf_table(camp_df), use_container_width=True, hide_index=True)
+
+    # --- TAB 2: AD SET PERFORMANCE ---
+    with tab_adset:
+        st.subheader("🗂️ Ad Set / Audience Performance (`utm_medium`)")
+        adset_df = get_performance_table("Ad_Set")
+        chart_adset = adset_df[adset_df["Ad_Set"] != "Unattributed / Direct"] if exclude_unattributed else adset_df
+
+        a1, a2 = st.columns(2)
+        with a1:
+            fig_as_l1 = px.bar(
+                chart_adset.sort_values("L1_Conversions", ascending=False).head(15),
+                x="L1_Conversions", y="Ad_Set", orientation="h",
+                color="L1_Conv_Rate (%)", text_auto=True,
+                title="Top Ad Sets by L1 Conversions",
+                color_continuous_scale="Tealgrn"
+            )
+            fig_as_l1.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(fig_as_l1, use_container_width=True)
+
+        with a2:
+            fig_as_rev = px.bar(
+                chart_adset.sort_values("Total_Revenue", ascending=False).head(15),
+                x=["FE_Revenue", "L1_Revenue"], y="Ad_Set", orientation="h",
+                title="Top Ad Sets by Stacked Revenue (Front-End + L1)",
                 labels={"value": "Revenue (₹)", "variable": "Stage"}
             )
-            fig_rev.update_layout(yaxis={"categoryorder": "total ascending"}, barmode="stack")
-            st.plotly_chart(fig_rev, use_container_width=True)
+            fig_as_rev.update_layout(yaxis={"categoryorder": "total ascending"}, barmode="stack")
+            st.plotly_chart(fig_as_rev, use_container_width=True)
 
-        st.dataframe(
-            attr_df.style.format({
-                "Front_End_Leads": "{:,.0f}",
-                "Front_End_Revenue": "₹{:,.2f}",
-                "High_Ticket_Sales": "{:,.0f}",
-                "Back_End_Revenue": "₹{:,.2f}",
-                "Total_Revenue": "₹{:,.2f}",
-                "Lead_to_Sale_CVR (%)": "{:.2f}%",
-                "Revenue_Per_Lead (EPL)": "₹{:,.2f}",
-                "Avg_Days_to_Convert": "{:.1f} days"
-            }),
-            use_container_width=True,
-            hide_index=True
-        )
+        st.dataframe(style_perf_table(adset_df), use_container_width=True, hide_index=True)
 
-    with tab2:
-        st.subheader("Winning Ad Creatives (`utm_content`)")
-        ad_df = build_attribution_table("utm_content")
-        min_leads_filter = st.slider("Minimum Leads per Creative to display in Scatter Matrix:", 5, 200, 20)
-        filtered_ads = ad_df[(ad_df["Front_End_Leads"] >= min_leads_filter) & (ad_df["utm_content"] != "Unattributed / Direct")]
+    # --- TAB 3: AD (CREATIVE) PERFORMANCE ---
+    with tab_ad:
+        st.subheader("🎨 Ad Creative Performance (`utm_content`)")
+        ad_df = get_performance_table("Ad")
+        chart_ad = ad_df[ad_df["Ad"] != "Unattributed / Direct"] if exclude_unattributed else ad_df
 
-        fig_matrix = px.scatter(
-            filtered_ads,
-            x="Front_End_Leads",
-            y="Lead_to_Sale_CVR (%)",
-            size="Total_Revenue",
-            color="High_Ticket_Sales",
-            hover_name="utm_content",
-            title="Creative Efficiency Matrix: Lead Volume vs. High-Ticket Conversion Rate (Bubble Size = Total Revenue)",
-            color_continuous_scale="Viridis"
-        )
-        st.plotly_chart(fig_matrix, use_container_width=True)
-
-        st.dataframe(
-            ad_df.head(30).style.format({
-                "Front_End_Leads": "{:,.0f}",
-                "Front_End_Revenue": "₹{:,.2f}",
-                "High_Ticket_Sales": "{:,.0f}",
-                "Back_End_Revenue": "₹{:,.2f}",
-                "Total_Revenue": "₹{:,.2f}",
-                "Lead_to_Sale_CVR (%)": "{:.2f}%",
-                "Revenue_Per_Lead (EPL)": "₹{:,.2f}",
-                "Avg_Days_to_Convert": "{:.1f} days"
-            }),
-            use_container_width=True,
-            hide_index=True
-        )
-
-    with tab3:
-        st.subheader("Daily Registration Volume & Conversion Velocity")
-        if df_leads["Order_DT"].notna().any():
-            df_leads["Lead_Date"] = df_leads["Order_DT"].dt.date
-            daily_leads = df_leads.groupby("Lead_Date", as_index=False).agg(
-                Leads=("clean_email", "count"),
-                FE_Revenue=("Mango Price(Sub)", "sum")
+        ad_c1, ad_c2 = st.columns(2)
+        with ad_c1:
+            fig_ad_l1 = px.bar(
+                chart_ad.sort_values("L1_Conversions", ascending=False).head(15),
+                x="L1_Conversions", y="Ad", orientation="h",
+                color="L1_Conv_Rate (%)", text_auto=True,
+                title="Winning Ads by L1 Conversions",
+                color_continuous_scale="Plasma"
             )
-            fig_daily = px.area(daily_leads, x="Lead_Date", y="Leads", title="Daily Front-End Workshop Registrations")
-            st.plotly_chart(fig_daily, use_container_width=True)
+            fig_ad_l1.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(fig_ad_l1, use_container_width=True)
 
-        if has_sales and len(matched_sales_df) > 0:
-            c_v1, c_v2 = st.columns(2)
-            with c_v1:
-                fig_hist = px.histogram(
-                    matched_sales_df, x="Days_to_Convert", nbins=15,
-                    title="Days from ₹199 Registration to ₹7,999 Purchase",
-                    labels={"Days_to_Convert": "Days to Convert"}
-                )
-                st.plotly_chart(fig_hist, use_container_width=True)
-            with c_v2:
-                matched_sales_df["Cohort_Lead_Date"] = matched_sales_df["Order_DT"].dt.date
-                cohort_df = matched_sales_df.groupby("Cohort_Lead_Date", as_index=False).agg(
-                    High_Ticket_Buyers=("clean_email", "count")
-                )
-                fig_cohort = px.bar(
-                    cohort_df, x="Cohort_Lead_Date", y="High_Ticket_Buyers",
-                    title="Which Registration Dates Produced the Most ₹7,999 Buyers?"
-                )
-                st.plotly_chart(fig_cohort, use_container_width=True)
+        with ad_c2:
+            min_leads_q = st.slider("Min Leads for Creative Matrix:", 5, 150, 20)
+            quad_df = chart_ad[chart_ad["Leads"] >= min_leads_q]
+            fig_quad = px.scatter(
+                quad_df, x="Leads", y="L1_Conv_Rate (%)",
+                size="Total_Revenue", color="L1_Conversions",
+                hover_name="Ad",
+                title="Ad Efficiency Matrix: Lead Volume vs. L1 Conv Rate (%)",
+                color_continuous_scale="Viridis"
+            )
+            st.plotly_chart(fig_quad, use_container_width=True)
 
-    with tab4:
-        if has_sales:
-            st.subheader("Attributed High-Ticket Buyers (Customer Journey Table)")
-            display_cols = [
-                "Name", "Email", "Mobile", "Amount", "Date", "Order_DT",
-                "Days_to_Convert", "Matched_Status", "Mango Name",
-                "utm_source", "utm_campaign", "utm_medium", "utm_content"
+        # Highlight Bleeders (High Front-End Leads, 0 L1 Conversions)
+        bleeders = ad_df[(ad_df["Leads"] >= 30) & (ad_df["L1_Conversions"] == 0) & (ad_df["Ad"] != "Unattributed / Direct")]
+        if not bleeders.empty:
+            with st.expander(f"⚠️ View {len(bleeders)} 'Non-Converting' Ads (30+ Leads but 0 L1 Sales)"):
+                st.dataframe(style_perf_table(bleeders), use_container_width=True, hide_index=True)
+
+        st.dataframe(style_perf_table(ad_df), use_container_width=True, hide_index=True)
+
+    # --- TAB 4: FULL HIERARCHY DRILL-DOWN ---
+    with tab_hier:
+        st.subheader("🌳 Full Hierarchy Drill-Down (`Campaign ➔ Ad Set ➔ Ad`)")
+        hier_df = get_performance_table(["Campaign", "Ad_Set", "Ad"])
+
+        # Interactive Filter by Campaign
+        camp_filter = st.multiselect(
+            "Filter Hierarchy by Campaign:",
+            options=sorted(hier_df["Campaign"].unique().tolist()),
+            default=[]
+        )
+        hier_filtered = hier_df[hier_df["Campaign"].isin(camp_filter)] if camp_filter else hier_df
+
+        # Sunburst visualization of L1 Conversions or Total Revenue
+        sun_df = hier_filtered[hier_filtered["Total_Revenue"] > 0].copy()
+        if exclude_unattributed:
+            sun_df = sun_df[sun_df["Campaign"] != "Unattributed / Direct"]
+
+        if not sun_df.empty:
+            fig_sun = px.sunburst(
+                sun_df.head(60),
+                path=["Campaign", "Ad_Set", "Ad"],
+                values="Total_Revenue",
+                color="L1_Conversions",
+                color_continuous_scale="RdYlGn",
+                title="Hierarchy Breakdown (Size = Total Revenue, Color = L1 Conversions)"
+            )
+            fig_sun.update_layout(height=550)
+            st.plotly_chart(fig_sun, use_container_width=True)
+
+        st.dataframe(style_perf_table(hier_filtered), use_container_width=True, hide_index=True)
+
+        csv_hier = hier_filtered.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Download Campaign-AdSet-Ad Performance CSV",
+            data=csv_hier,
+            file_name="campaign_adset_ad_performance.csv",
+            mime="text/csv"
+        )
+
+    # --- TAB 5: MATCHED BUYERS & UNMATCHED LIST ---
+    with tab_buyers:
+        if has_l1:
+            st.subheader(f"✅ Matched L1 Buyers ({len(l1_valid)} of {len(df_l1)} matched)")
+            cols_to_show = [
+                "Buyer_Name", "clean_email", "clean_phone", "L1_Amount",
+                "Match_Method", "Campaign", "Ad_Set", "Ad", "Source",
+                "Mango_Name", "Order_DT", "L1_DT", "Days_to_Convert"
             ]
-            st.dataframe(sales_attributed[display_cols], use_container_width=True, hide_index=True)
+            existing_cols = [c for c in cols_to_show if c in l1_matched.columns]
+            st.dataframe(l1_matched[existing_cols], use_container_width=True, hide_index=True)
 
-            csv_bytes = sales_attributed.to_csv(index=False).encode("utf-8")
+            unmatched_df = l1_matched[l1_matched["Match_Method"] == "Unmatched"]
+            if not unmatched_df.empty:
+                st.warning(f"⚠️ {len(unmatched_df)} L1 Buyers did not match any email or 10-digit phone in the filtered Tagmango file:")
+                st.dataframe(unmatched_df[["Buyer_Name", "clean_email", "clean_phone", "L1_Amount"]], use_container_width=True, hide_index=True)
+
+            csv_l1 = l1_matched[existing_cols].to_csv(index=False).encode("utf-8")
             st.download_button(
-                "⬇️ Download Full Attributed Sales Report (CSV)",
-                data=csv_bytes,
-                file_name="attributed_high_ticket_sales.csv",
+                "⬇️ Download Attributed L1 Buyers List (CSV)",
+                data=csv_l1,
+                file_name="l1_buyers_with_utm_attribution.csv",
                 mime="text/csv"
             )
         else:
-            st.info("Upload your High-Ticket Sales CSV in the sidebar to inspect individual buyer attribution.")
+            st.info("👈 Upload your L1 Conversion CSV/Excel file in the sidebar to view buyer-level attribution.")
 
 else:
-    st.info("👈 Upload `simplified-1793879554194.xlsx` (Leads) and `Untitled spreadsheet - Sheet1.csv` (High-Ticket Sales) in the sidebar to launch your dashboard.")
+    st.info("👈 Upload your **Tagmango File** and **L1 Conversion File** in the left sidebar to begin.")
